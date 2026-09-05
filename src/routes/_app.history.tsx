@@ -1,10 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { dateTimeFmt } from "@/lib/format";
 import { EmptyState, ErrorState, PageHeader } from "@/components/agentx/page-header";
 import { StatusBadge } from "@/components/agentx/status-badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -20,7 +29,8 @@ export const Route = createFileRoute("/_app/history")({
       { title: "Action History — AGENTX" },
       {
         name: "description",
-        content: "Full audit trail of every autonomous action approval, rejection, block and execution.",
+        content:
+          "Full audit trail of every autonomous action approval, rejection, block and execution.",
       },
       { property: "og:title", content: "Action History — AGENTX" },
       {
@@ -34,7 +44,14 @@ export const Route = createFileRoute("/_app/history")({
   component: HistoryPage,
 });
 
+const STATUSES = ["All", "Approved", "Executed", "Rejected", "Blocked"] as const;
+const TYPES = ["All", "PRODUCT_PROMOTION", "CUSTOMER_RETENTION"] as const;
+
 function HistoryPage() {
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState<string>("All");
+  const [type, setType] = useState<string>("All");
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["action-history"],
     queryFn: async () => {
@@ -48,17 +65,70 @@ function HistoryPage() {
     },
   });
 
+  const rows = useMemo(() => {
+    const term = q.trim().toLowerCase();
+    return (data ?? []).filter((h) => {
+      const target =
+        h.autonomous_actions?.products?.product_name ??
+        h.autonomous_actions?.customers?.name ??
+        "";
+      const matchTerm =
+        !term ||
+        target.toLowerCase().includes(term) ||
+        String(h.reason ?? "").toLowerCase().includes(term);
+      const matchStatus = status === "All" || h.new_status === status;
+      const matchType = type === "All" || h.autonomous_actions?.action_type === type;
+      return matchTerm && matchStatus && matchType;
+    });
+  }, [data, q, status, type]);
+
   return (
     <div>
-      <PageHeader title="Action History" description="Every state change recorded by the autonomous agent." />
+      <PageHeader
+        title="Action History"
+        description="Every state change recorded by the autonomous agent."
+      />
+
+      <div className="mb-4 flex flex-wrap gap-3">
+        <Input
+          className="max-w-sm"
+          placeholder="Search by product, customer or note…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <Select value={status} onValueChange={setStatus}>
+          <SelectTrigger className="w-44">
+            <SelectValue placeholder="Outcome" />
+          </SelectTrigger>
+          <SelectContent>
+            {STATUSES.map((s) => (
+              <SelectItem key={s} value={s}>
+                {s === "All" ? "All outcomes" : s}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={type} onValueChange={setType}>
+          <SelectTrigger className="w-52">
+            <SelectValue placeholder="Action type" />
+          </SelectTrigger>
+          <SelectContent>
+            {TYPES.map((t) => (
+              <SelectItem key={t} value={t}>
+                {t === "All" ? "All action types" : t.replace("_", " ")}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
 
       {isLoading ? (
         <Skeleton className="h-80" />
       ) : error ? (
         <ErrorState message={(error as Error).message} />
-      ) : (data ?? []).length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState
-          title="No history yet."
+          title="No history in this view."
           hint="Approve, reject or execute an action and it will be logged here."
         />
       ) : (
@@ -75,7 +145,7 @@ function HistoryPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {(data ?? []).map((h) => (
+              {rows.map((h) => (
                 <TableRow key={h.history_id}>
                   <TableCell className="text-muted-foreground whitespace-nowrap">
                     {dateTimeFmt(h.created_at)}
@@ -94,7 +164,9 @@ function HistoryPage() {
                   <TableCell>
                     <StatusBadge status={h.new_status} />
                   </TableCell>
-                  <TableCell className="text-muted-foreground max-w-sm text-sm">{h.reason ?? "—"}</TableCell>
+                  <TableCell className="text-muted-foreground max-w-sm text-sm">
+                    {h.reason ?? "—"}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>

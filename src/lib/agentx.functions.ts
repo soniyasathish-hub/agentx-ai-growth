@@ -181,7 +181,26 @@ async function transition(
 
   const discount = opts.overrides?.discount_percent ?? Number(action.discount_percent);
   const priceChange = opts.overrides?.price_change_percent ?? Number(action.price_change_percent);
-  const margin = Number(action.margin_percent);
+
+  // Margin is always recomputed server-side from live catalogue data — never trusted from the client.
+  let product: { product_id: string; product_name: string; price: number; cost: number } | null = null;
+  if (action.product_id) {
+    const { data: p, error: pErr } = await ctx.supabase
+      .from("products")
+      .select("product_id, product_name, price, cost")
+      .eq("product_id", action.product_id)
+      .eq("business_id", membership.business_id)
+      .maybeSingle();
+    if (pErr) throw new Error(pErr.message);
+    if (p) product = { ...p, price: Number(p.price), cost: Number(p.cost) };
+  }
+
+  let margin = Number(action.margin_percent);
+  let offerPrice: number | null = null;
+  if (product) {
+    offerPrice = Number((product.price * (1 - discount / 100)).toFixed(2));
+    margin = offerPrice > 0 ? Number((((offerPrice - product.cost) / offerPrice) * 100).toFixed(1)) : 0;
+  }
 
   if (opts.runGuardrails) {
     const guard = validateGuardrails({
@@ -195,10 +214,15 @@ async function transition(
         .update({
           status: ACTION_STATUS.blocked,
           block_reason: guard.reason,
+          blocked_at: new Date().toISOString(),
+          performed_by: ctx.userId,
           discount_percent: discount,
           price_change_percent: priceChange,
+          margin_percent: margin,
+          dismissed: false,
         })
-        .eq("action_id", actionId);
+        .eq("action_id", actionId)
+        .eq("business_id", membership.business_id);
       await ctx.supabase.from("action_history").insert({
         action_id: actionId,
         business_id: membership.business_id,
@@ -214,10 +238,43 @@ async function transition(
   const patch: Record<string, unknown> = {
     status: opts.nextStatus,
     block_reason: null,
+    blocked_at: null,
+    performed_by: ctx.userId,
     discount_percent: discount,
     price_change_percent: priceChange,
+    margin_percent: margin,
   };
   if (opts.stamp) patch[opts.stamp] = new Date().toISOString();
+
+  let effect = "";
+
+  // Execution side effects — the action actually changes the business data.
+  if (opts.nextStatus === ACTION_STATUS.executed) {
+    if (product && offerPrice !== null) {
+      const { error: prErr } = await ctx.supabase
+        .from("products")
+        .update({ price: offerPrice })
+        .eq("product_id", product.product_id)
+        .eq("business_id", membership.business_id);
+      if (prErr) throw new Error(prErr.message);
+      patch["previous_price"] = product.price;
+      patch["new_price"] = offerPrice;
+      effect = ` Promotional price applied to ${product.product_name}: ${product.price} → ${offerPrice} (−${discount}%).`;
+    } else if (action.customer_id) {
+      const { error: offErr } = await ctx.supabase.from("retention_offers").upsert(
+        {
+          business_id: membership.business_id,
+          action_id: actionId,
+          customer_id: action.customer_id,
+          discount_percent: discount,
+          estimated_opportunity: Number(action.estimated_opportunity),
+        },
+        { onConflict: "action_id" },
+      );
+      if (offErr) throw new Error(offErr.message);
+      effect = ` Retention offer of ${discount}% issued with a 14-day expiry.`;
+    }
+  }
 
   const { error: upErr } = await ctx.supabase
     .from("autonomous_actions")
@@ -232,11 +289,35 @@ async function transition(
     previous_status: action.status,
     new_status: opts.nextStatus,
     performed_by: ctx.userId,
-    reason: opts.reason ?? `${opts.nextStatus} by ${membership.name}`,
+    reason: `${opts.reason ?? `${opts.nextStatus} by ${membership.name}`}${effect}`,
   });
 
-  return { ok: true as const, blocked: false as const, status: opts.nextStatus };
+  return {
+    ok: true as const,
+    blocked: false as const,
+    status: opts.nextStatus,
+    margin_percent: margin,
+    effect: effect.trim() || null,
+  };
 }
+
+/** Hides a blocked or rejected action from the queue without deleting the audit trail. */
+export const dismissAction = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) => z.object({ action_id: z.string().uuid() }).parse(input))
+  .handler(async ({ data, context }) => {
+    const ctx = context as unknown as Ctx;
+    const membership = await loadMembership(ctx);
+    const { error } = await ctx.supabase
+      .from("autonomous_actions")
+      .update({ dismissed: true })
+      .eq("action_id", data.action_id)
+      .eq("business_id", membership.business_id)
+      .in("status", [ACTION_STATUS.blocked, ACTION_STATUS.rejected]);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
 
 const ApproveInput = z.object({
   action_id: z.string().uuid(),

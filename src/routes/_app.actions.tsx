@@ -2,16 +2,22 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Bot, CheckCircle2, Loader2, PlayCircle, ShieldAlert, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, EyeOff, Loader2, PlayCircle, ShieldAlert, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
-import { approveAction, executeAction, rejectAction, syncAutonomousActions } from "@/lib/agentx.functions";
+import {
+  approveAction,
+  dismissAction,
+  executeAction,
+  rejectAction,
+  syncAutonomousActions,
+} from "@/lib/agentx.functions";
 import {
   MAX_DISCOUNT_PERCENT,
   MAX_PRICE_CHANGE_PERCENT,
   MIN_MARGIN_PERCENT,
 } from "@/lib/agentx-core";
-import { currency, dateTimeFmt } from "@/lib/format";
+import { currency, currencyPrecise, dateTimeFmt } from "@/lib/format";
 import { EmptyState, ErrorState, PageHeader } from "@/components/agentx/page-header";
 import { PriorityBadge, StatusBadge } from "@/components/agentx/status-badge";
 import { Button } from "@/components/ui/button";
@@ -19,6 +25,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/_app/actions")({
   head: () => ({
@@ -42,6 +58,13 @@ export const Route = createFileRoute("/_app/actions")({
 });
 
 const FILTERS = ["All", "Pending Approval", "Approved", "Executed", "Rejected", "Blocked"] as const;
+type Filter = (typeof FILTERS)[number];
+
+type Confirm =
+  | { kind: "approve"; action: any; discount: number }
+  | { kind: "reject"; action: any }
+  | { kind: "execute"; action: any }
+  | null;
 
 function ActionsPage() {
   const queryClient = useQueryClient();
@@ -49,15 +72,19 @@ function ActionsPage() {
   const runApprove = useServerFn(approveAction);
   const runReject = useServerFn(rejectAction);
   const runExecute = useServerFn(executeAction);
-  const [filter, setFilter] = useState<(typeof FILTERS)[number]>("All");
+  const runDismiss = useServerFn(dismissAction);
+
+  const [filter, setFilter] = useState<Filter>("All");
   const [discounts, setDiscounts] = useState<Record<string, number>>({});
+  const [confirm, setConfirm] = useState<Confirm>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["actions"],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("autonomous_actions")
-        .select("*, products(product_name), customers(name)")
+        .select("*, products(product_name, price), customers(name, email)")
+        .eq("dismissed", false)
         .order("created_at", { ascending: false });
       if (error) throw new Error(error.message);
       return data as any[];
@@ -68,6 +95,7 @@ function ActionsPage() {
     queryClient.invalidateQueries({ queryKey: ["actions"] });
     queryClient.invalidateQueries({ queryKey: ["action-history"] });
     queryClient.invalidateQueries({ queryKey: ["intelligence"] });
+    queryClient.invalidateQueries({ queryKey: ["products"] });
   };
 
   const sync = useMutation({
@@ -94,7 +122,7 @@ function ActionsPage() {
       }),
     onSuccess: (res) => {
       if (res.blocked) toast.error(`Guardrail blocked: ${res.reason}`);
-      else toast.success("Action approved.");
+      else toast.success("Action approved and ready to execute.");
       refresh();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -113,18 +141,72 @@ function ActionsPage() {
     mutationFn: (id: string) => runExecute({ data: { action_id: id } }),
     onSuccess: (res) => {
       if (res.blocked) toast.error(`Guardrail blocked: ${res.reason}`);
-      else toast.success("Action executed.");
+      else toast.success(res.effect ?? "Action executed.");
       refresh();
     },
     onError: (e: Error) => toast.error(e.message),
   });
+
+  const dismiss = useMutation({
+    mutationFn: (id: string) => runDismiss({ data: { action_id: id } }),
+    onSuccess: () => {
+      toast.success("Action dismissed.");
+      refresh();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const counts = useMemo(() => {
+    const list = data ?? [];
+    const map: Record<Filter, number> = {
+      All: list.length,
+      "Pending Approval": 0,
+      Approved: 0,
+      Executed: 0,
+      Rejected: 0,
+      Blocked: 0,
+    };
+    for (const a of list) if (a.status in map) map[a.status as Filter] += 1;
+    return map;
+  }, [data]);
 
   const rows = useMemo(
     () => (data ?? []).filter((a) => filter === "All" || a.status === filter),
     [data, filter],
   );
 
-  const busy = approve.isPending || reject.isPending || execute.isPending;
+  const busy = approve.isPending || reject.isPending || execute.isPending || dismiss.isPending;
+
+  const runConfirm = () => {
+    if (!confirm) return;
+    if (confirm.kind === "approve")
+      approve.mutate({ action_id: confirm.action.action_id, discount_percent: confirm.discount });
+    if (confirm.kind === "reject") reject.mutate(confirm.action.action_id);
+    if (confirm.kind === "execute") execute.mutate(confirm.action.action_id);
+    setConfirm(null);
+  };
+
+  const confirmCopy = () => {
+    if (!confirm) return { title: "", body: "" };
+    const name =
+      confirm.action.products?.product_name ?? confirm.action.customers?.name ?? "this action";
+    if (confirm.kind === "approve")
+      return {
+        title: "Approve this action?",
+        body: `A ${confirm.discount}% discount will be locked in for ${name}. Guardrails are re-checked before anything changes.`,
+      };
+    if (confirm.kind === "reject")
+      return {
+        title: "Reject this action?",
+        body: `${name} will be marked rejected and logged in the audit trail. It can be regenerated later.`,
+      };
+    return {
+      title: "Execute this action?",
+      body: confirm.action.product_id
+        ? `The promotional price will be applied to ${name} immediately.`
+        : `A win-back offer will be issued to ${name} with a 14-day expiry.`,
+    };
+  };
 
   return (
     <div>
@@ -139,11 +221,11 @@ function ActionsPage() {
         }
       />
 
-      <Tabs value={filter} onValueChange={(v) => setFilter(v as (typeof FILTERS)[number])} className="mb-5">
+      <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)} className="mb-5">
         <TabsList className="flex-wrap">
           {FILTERS.map((f) => (
             <TabsTrigger key={f} value={f}>
-              {f}
+              {f} ({counts[f]})
             </TabsTrigger>
           ))}
         </TabsList>
@@ -167,6 +249,7 @@ function ActionsPage() {
           {rows.map((a) => {
             const name = a.products?.product_name ?? a.customers?.name ?? "Business-wide";
             const discount = discounts[a.action_id] ?? Number(a.discount_percent);
+            const overLimit = discount > MAX_DISCOUNT_PERCENT;
             return (
               <article key={a.action_id} className="panel p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -203,6 +286,13 @@ function ActionsPage() {
                   </div>
                 </dl>
 
+                {a.status === "Executed" && a.new_price ? (
+                  <p className="text-success mt-3 text-sm">
+                    Price applied: {currencyPrecise(a.previous_price)} →{" "}
+                    {currencyPrecise(a.new_price)}
+                  </p>
+                ) : null}
+
                 {a.status === "Blocked" ? (
                   <div className="border-destructive/40 bg-destructive/10 text-destructive mt-4 flex items-start gap-2 rounded-xl border p-3 text-sm">
                     <ShieldAlert className="mt-0.5 size-4 shrink-0" />
@@ -218,6 +308,7 @@ function ActionsPage() {
                   {a.approved_at ? <p>Approved {dateTimeFmt(a.approved_at)}</p> : null}
                   {a.executed_at ? <p>Executed {dateTimeFmt(a.executed_at)}</p> : null}
                   {a.rejected_at ? <p>Rejected {dateTimeFmt(a.rejected_at)}</p> : null}
+                  {a.blocked_at ? <p>Blocked {dateTimeFmt(a.blocked_at)}</p> : null}
                 </div>
 
                 {a.status === "Pending Approval" ? (
@@ -236,32 +327,52 @@ function ActionsPage() {
                       />
                     </div>
                     <Button
-                      onClick={() => approve.mutate({ action_id: a.action_id, discount_percent: discount })}
+                      onClick={() => setConfirm({ kind: "approve", action: a, discount })}
                       disabled={busy}
                     >
                       <CheckCircle2 className="size-4" /> Approve
                     </Button>
-                    <Button variant="outline" onClick={() => reject.mutate(a.action_id)} disabled={busy}>
+                    <Button
+                      variant="outline"
+                      onClick={() => setConfirm({ kind: "reject", action: a })}
+                      disabled={busy}
+                    >
                       <XCircle className="size-4" /> Reject
                     </Button>
+                    {overLimit ? (
+                      <p className="text-destructive w-full text-xs">
+                        Above the {MAX_DISCOUNT_PERCENT}% guardrail — approving will block this action.
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
 
                 {a.status === "Approved" ? (
                   <div className="border-border mt-4 flex flex-wrap gap-3 border-t pt-4">
-                    <Button onClick={() => execute.mutate(a.action_id)} disabled={busy}>
+                    <Button
+                      onClick={() => setConfirm({ kind: "execute", action: a })}
+                      disabled={busy}
+                    >
                       <PlayCircle className="size-4" /> Execute
                     </Button>
-                    <Button variant="outline" onClick={() => reject.mutate(a.action_id)} disabled={busy}>
+                    <Button
+                      variant="outline"
+                      onClick={() => setConfirm({ kind: "reject", action: a })}
+                      disabled={busy}
+                    >
                       <XCircle className="size-4" /> Reject
                     </Button>
                   </div>
                 ) : null}
 
-                {a.status === "Blocked" ? (
+                {a.status === "Blocked" || a.status === "Rejected" ? (
                   <div className="border-border mt-4 flex flex-wrap gap-3 border-t pt-4">
-                    <Button variant="outline" onClick={() => reject.mutate(a.action_id)} disabled={busy}>
-                      <XCircle className="size-4" /> Dismiss blocked action
+                    <Button
+                      variant="outline"
+                      onClick={() => dismiss.mutate(a.action_id)}
+                      disabled={busy}
+                    >
+                      <EyeOff className="size-4" /> Dismiss
                     </Button>
                   </div>
                 ) : null}
@@ -270,6 +381,19 @@ function ActionsPage() {
           })}
         </div>
       )}
+
+      <AlertDialog open={confirm !== null} onOpenChange={(o) => !o && setConfirm(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{confirmCopy().title}</AlertDialogTitle>
+            <AlertDialogDescription>{confirmCopy().body}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={runConfirm}>Confirm</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
