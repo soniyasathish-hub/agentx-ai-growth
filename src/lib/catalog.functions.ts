@@ -208,7 +208,7 @@ export const getCustomerDetail = createServerFn({ method: "POST" })
     };
 
     const intent = computeCustomerIntent(snap)[0]!;
-    const lifetimeValue = sales.reduce((a, s) => a + s.total_amount, 0);
+    const lifetimeValue = sales.reduce((a: number, s: { total_amount: number }) => a + s.total_amount, 0);
     const totalOrders = sales.length;
     const averageOrderValue = totalOrders ? lifetimeValue / totalOrders : 0;
 
