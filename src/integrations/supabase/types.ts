@@ -68,13 +68,18 @@ export type Database = {
           action_type: string
           approved_at: string | null
           block_reason: string | null
+          blocked_at: string | null
           business_id: string
           created_at: string
           customer_id: string | null
           discount_percent: number
+          dismissed: boolean
           estimated_opportunity: number
           executed_at: string | null
           margin_percent: number
+          new_price: number | null
+          performed_by: string | null
+          previous_price: number | null
           price_change_percent: number
           priority: string
           product_id: string | null
@@ -87,13 +92,18 @@ export type Database = {
           action_type: string
           approved_at?: string | null
           block_reason?: string | null
+          blocked_at?: string | null
           business_id: string
           created_at?: string
           customer_id?: string | null
           discount_percent?: number
+          dismissed?: boolean
           estimated_opportunity?: number
           executed_at?: string | null
           margin_percent?: number
+          new_price?: number | null
+          performed_by?: string | null
+          previous_price?: number | null
           price_change_percent?: number
           priority?: string
           product_id?: string | null
@@ -106,13 +116,18 @@ export type Database = {
           action_type?: string
           approved_at?: string | null
           block_reason?: string | null
+          blocked_at?: string | null
           business_id?: string
           created_at?: string
           customer_id?: string | null
           discount_percent?: number
+          dismissed?: boolean
           estimated_opportunity?: number
           executed_at?: string | null
           margin_percent?: number
+          new_price?: number | null
+          performed_by?: string | null
+          previous_price?: number | null
           price_change_percent?: number
           priority?: string
           product_id?: string | null
@@ -247,6 +262,64 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "businesses"
             referencedColumns: ["business_id"]
+          },
+        ]
+      }
+      retention_offers: {
+        Row: {
+          action_id: string
+          business_id: string
+          created_at: string
+          customer_id: string | null
+          discount_percent: number
+          estimated_opportunity: number
+          expires_at: string
+          offer_id: string
+          updated_at: string
+        }
+        Insert: {
+          action_id: string
+          business_id: string
+          created_at?: string
+          customer_id?: string | null
+          discount_percent?: number
+          estimated_opportunity?: number
+          expires_at?: string
+          offer_id?: string
+          updated_at?: string
+        }
+        Update: {
+          action_id?: string
+          business_id?: string
+          created_at?: string
+          customer_id?: string | null
+          discount_percent?: number
+          estimated_opportunity?: number
+          expires_at?: string
+          offer_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "retention_offers_action_id_fkey"
+            columns: ["action_id"]
+            isOneToOne: true
+            referencedRelation: "autonomous_actions"
+            referencedColumns: ["action_id"]
+          },
+          {
+            foreignKeyName: "retention_offers_business_id_fkey"
+            columns: ["business_id"]
+            isOneToOne: false
+            referencedRelation: "businesses"
+            referencedColumns: ["business_id"]
+          },
+          {
+            foreignKeyName: "retention_offers_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["customer_id"]
           },
         ]
       }
