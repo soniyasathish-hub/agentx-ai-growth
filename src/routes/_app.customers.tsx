@@ -377,7 +377,7 @@ function CustomersPage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {d.purchases.map((s) => (
+                        {d.purchases.map((s: any) => (
                           <TableRow key={s.sale_id}>
                             <TableCell className="text-muted-foreground whitespace-nowrap">
                               {dateFmt(s.sale_date)}
