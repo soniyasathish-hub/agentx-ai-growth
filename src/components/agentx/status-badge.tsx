@@ -20,7 +20,7 @@ const INTENT_STYLES: Record<string, string> = {
   Low: "bg-muted text-muted-foreground border-border",
 };
 
-function Pill({ label, className }: { label: string; className?: string }) {
+function Pill({ label, className }: { label: string; className?: string | undefined }) {
   return (
     <span
       className={cn(
